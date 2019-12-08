@@ -6,9 +6,15 @@ set -u
 
 # Directory to the bash
 
-RELATIVE_SCRIPT_DIR=$(dirname $BASH_SOURCE)
-cd $RELATIVE_SCRIPT_DIR
-SCRIPT_DIR=$(pwd)
+function get_bash_source_absolute() {
+    ORIGINAL_PWD=$(pwd)
+    RELATIVE_SCRIPT_DIR=$(dirname $BASH_SOURCE)
+    cd $RELATIVE_SCRIPT_DIR
+    echo $(pwd)
+    cd $ORIGINAL_PWD
+}
+
+SCRIPT_DIR=$(get_bash_source_absolute)
 
 source ${SCRIPT_DIR}/config.sh
 
