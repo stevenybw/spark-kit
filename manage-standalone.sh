@@ -2,7 +2,7 @@
 # Scripts to manage Spark standalone daemons
 # Bowen Yu <stevenybw@hotmail.com>
 
-set -u
+# set -u
 
 # Directory to the bash
 
@@ -21,10 +21,13 @@ source ${SCRIPT_DIR}/config.sh
 # Several typical configurations
 
 # Run locally: 1 node, 2 numa-node, 6 executors, (8 cores + 30 GB) for each executor
-LOCAL="1 2 6 8 30g"
+SINGLE="1 1 1 8 30g"
+
+# Run locally: 1 node, 2 numa-node, 8 executors, (7 cores + 30 GB) for each executor
+LOCAL="1 2 8 7 28g"
 
 # Run distributed: 8 nodes, 2 numa-node, 6 executors, (8 cores + 30 GB) for each executor
-DIST="8 2 6 8 30g"
+DIST="8 2 8 7 28g"
 
 MASTER=$(hostname)
 
@@ -72,7 +75,8 @@ function start_slaves() {
     memory_per_container=$5
     
     hostlist=${SLAVES_HOSTLIST[@]:0:$num_nodes}
-    remote_cmd="SPARK_HOME=${SPARK_HOME} SPARK_WORKER_INSTANCES=${container_per_node} SPARK_NUMA_NODES=${numa_nodes_per_node} ${SCRIPT_DIR}/sbin/start-slave-numabind.sh -c ${cores_per_container} -m ${memory_per_container} -i "'$(hostname -f)'" -d ${SPARK_WORK_DIR} spark://${MASTER}:7077"
+    remote_cmd="SPARK_HOME=${SPARK_HOME} SPARK_WORKER_INSTANCES=${container_per_node} SPARK_NUMA_NODES=${numa_nodes_per_node} ${SCRIPT_DIR}/sbin/start-slave-numabind.sh -c ${cores_per_container} -m ${memory_per_container} -i "'$(hostname -f)'" -d ${SPARK_WORK_DIR} --properties-file ${SCRIPT_DIR}/spark-properties.conf spark://${MASTER}:7077"
+    echo ${remote_cmd}
     clush -w $(echo $hostlist | sed "s/ /,/g") ${remote_cmd}
 }
 
@@ -85,11 +89,30 @@ function start_slaves_locally() {
     memory_per_container=$5
     
     hostlist=$(hostname)
-    remote_cmd="SPARK_HOME=${SPARK_HOME} SPARK_WORKER_INSTANCES=${container_per_node} SPARK_NUMA_NODES=${numa_nodes_per_node} ${SPARK_HOME}/sbin/start-slave-numabind.sh -c ${cores_per_container} -m ${memory_per_container} -i "'$(hostname -f)'" -d ${SPARK_WORK_DIR} spark://${MASTER}:7077"
+    remote_cmd="SPARK_HOME=${SPARK_HOME} SPARK_WORKER_INSTANCES=${container_per_node} SPARK_NUMA_NODES=${numa_nodes_per_node} ${SCRIPT_DIR}/sbin/start-slave-numabind.sh -c ${cores_per_container} -m ${memory_per_container} -i "'$(hostname -f)'" -d ${SPARK_WORK_DIR} --properties-file ${SCRIPT_DIR}/spark-properties.conf spark://${MASTER}:7077"
+    echo ${remote_cmd}
     clush -w $(echo $hostlist | sed "s/ /,/g") ${remote_cmd}
 }
 
 # Kill all the slaves in the AVAILABLE_HOSTLIST
+function local_stop_slaves() {
+    clush -w $(hostname) 'ps -aux | grep "org.apache.spark.deploy.worker.Worker" | grep -v "grep" | tr -s " " | cut -d " " -f 2 | xargs -i kill {}'
+    clush -w $(hostname) 'ps -aux | grep "org.apache.spark.executor.CoarseGrainedExecutorBackend" | grep -v "grep" | tr -s " " | cut -d " " -f 2 | xargs -i kill {}'
+    clush -w $(hostname) 'ps -aux | grep "SparkSubmit" | grep -v "grep" | tr -s " " | cut -d " " -f 2 | xargs -i kill {}'
+    ps -aux | grep "SparkSubmit" | grep -v "grep" | tr -s " " | cut -d " " -f 2 | xargs -i kill {}
+    sleep 1
+    clush -w $(hostname) 'ps -aux | grep "org.apache.spark.deploy.worker.Worker" | grep -v "grep" | tr -s " " | cut -d " " -f 2 | xargs -i kill -9 {}'
+    clush -w $(hostname) 'ps -aux | grep "org.apache.spark.executor.CoarseGrainedExecutorBackend" | grep -v "grep" | tr -s " " | cut -d " " -f 2 | xargs -i kill {}'
+    clush -w $(hostname) 'ps -aux | grep "SparkSubmit" | grep -v "grep" | tr -s " " | cut -d " " -f 2 | xargs -i kill -9 {}'
+    ps -aux | grep "SparkSubmit" | grep -v "grep" | tr -s " " | cut -d " " -f 2 | xargs -i kill -9 {}
+    sleep 1
+    clush -w $(hostname) 'ps -aux | grep "org.apache.spark.deploy.worker.Worker" | grep -v "grep" | tr -s " "'
+    clush -w $(hostname) 'ps -aux | grep "org.apache.spark.executor.CoarseGrainedExecutorBackend" | grep -v "grep" | tr -s " " | cut -d " " -f 2 | xargs -i kill {}'
+    clush -w $(hostname) 'ps -aux | grep "SparkSubmit" | grep -v "grep" | tr -s " "'
+    ps -aux | grep "SparkSubmit" | grep -v "grep" | tr -s " "
+}
+
+# Kill all the slaves in the local host
 function stop_slaves() {
     clush -w $(echo ${AVAILABLE_HOSTLIST[@]} | sed "s/ /,/g") 'ps -aux | grep "org.apache.spark.deploy.worker.Worker" | grep -v "grep" | tr -s " " | cut -d " " -f 2 | xargs -i kill {}'
     clush -w $(echo ${AVAILABLE_HOSTLIST[@]} | sed "s/ /,/g") 'ps -aux | grep "org.apache.spark.executor.CoarseGrainedExecutorBackend" | grep -v "grep" | tr -s " " | cut -d " " -f 2 | xargs -i kill {}'
@@ -107,12 +130,40 @@ function stop_slaves() {
     ps -aux | grep "SparkSubmit" | grep -v "grep" | tr -s " "
 }
 
+# Kill everything
+function stop_all() {
+  stop_master
+  stop_slaves
+}
+
+# Deploy the environment with the hosts in AVAILABLE_HOSTLIST as slaves (do not stop the others)
+# Example: setup_environment 8 2 6 4 30g
+function setup_environment() {
+    num_nodes=$1
+    start_master
+    sleep 1
+    if [ ${num_nodes} -eq 1 ] ; then
+        echo "Start Spark cluster locally"
+        start_slaves_locally $*
+    else
+        echo "Start Spark cluster globally"
+        start_slaves $*
+    fi
+    sleep 3
+}
+
 # Reset the environment with the hosts in AVAILABLE_HOSTLIST as slaves
 # Example: reset_environment 8 2 6 4 30g
 function reset_environment() {
     num_nodes=$1
     stop_master
-    stop_slaves
+    if [ ${num_nodes} -eq 1 ] ; then
+        echo "Stop Spark cluster locally"
+        local_stop_slaves
+    else
+        echo "Stop Spark cluster globally"
+        stop_slaves
+    fi
     sleep 2
     start_master
     sleep 1
@@ -162,6 +213,24 @@ function show_spark_shell_command() {
 function enter_spark_shell() {
     echo $(show_spark_shell_command $*)
     eval $(show_spark_shell_command $*)
+}
+
+# Show the command to launch local spark shell
+function show_local_spark_shell_command() {
+    num_nodes=$1
+    numa_nodes_per_node=$2
+    container_per_node=$3
+    cores_per_container=$4
+    memory_per_container=$5
+    total_cores=$(echo $num_nodes*$container_per_node*$cores_per_container | bc)
+    
+    echo SPARK_HOME=$SPARK_HOME $SPARK_HOME/bin/spark-shell --master local[*] $BASIC_SPARK_CONF --conf spark.default.parallelism=$total_cores --driver-memory $memory_per_container --executor-memory $memory_per_container --executor-cores $cores_per_container
+}
+
+# Enter the local Spark shell
+function enter_local_spark_shell() {
+    echo $(show_local_spark_shell_command $*)
+    eval $(show_local_spark_shell_command $*)
 }
 
 # Show the web ui URL
